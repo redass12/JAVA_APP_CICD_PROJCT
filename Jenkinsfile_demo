@@ -1,0 +1,96 @@
+pipeline{
+    agent any
+    environment{
+        VERSION = "${env.BUILD_ID}"
+    }
+    stages{
+        stage("sonar qube analysis"){
+            agent{
+               docker {
+                    image 'openjdk:11'
+               }
+            }
+            steps{
+               script{
+                withSonarQubeEnv(credentialsId: 'sonar-token') {
+                      sh '''
+                      chmod +x gradlew
+                      ./gradlew sonarqube
+                      '''
+                    }
+
+                timeout(5) {
+                     def qg = waitForQualityGate()
+                      if (qg.status != 'OK') {
+                           error "Le pipeline a été abandonné en raison d'une défaillance de la qualité  de la gate: ${qg.status}"
+                      }
+                    }
+               }
+            }
+        }
+
+       stage("construire l'image docker et la pusher sur nexus"){
+           steps{
+               script{
+
+               withCredentials([string(credentialsId: 'nexus_pass', variable: 'docker_pass')]) {
+                    sh '''
+
+                   docker build -t 35.188.44.251:8083/springapp:${VERSION} .
+                   docker login -u admin -p $docker_pass 35.188.44.251:8083
+                  docker push  35.188.44.251:8083/springapp:${VERSION}
+                  docker rmi 35.188.44.251:8083/springapp:${VERSION}  
+                  docker image prune -f      
+                  '''
+                  }
+                }
+              }
+           }
+
+
+        stage('validation manuelle'){
+            steps{
+                script{
+                    timeout(10) {
+                        mail bcc: '', body: "<br>Projet: ${env.JOB_NAME} <br>Numéro de build: ${env.BUILD_NUMBER} <br> Go a  l url de construction et approuvez la demande de deploiement <br> URL de build: ${env.BUILD_URL}", cc: '', charset: 'UTF-8', from: '', mimeType: 'text/html', replyTo: '', subject: "${currentBuild.result} CI: Nom du projet -> ${env.JOB_NAME}", to: "redataraoui1@gmail.com";  
+                        input(id: "Deploy Gate", message: "Deploy ${params.project_name}?", ok: 'Deploy')
+                    }
+                }
+            }
+        }
+
+
+
+        stage('Deploiement d\'une application sur un cluster k8s') {
+            steps {
+               script{
+                   withCredentials([kubeconfigFile(credentialsId: 'kubernetes-config', variable: 'KUBECONFIG')]) {
+                        dir('kubernetes/') {
+                            
+                          sh 'helm upgrade --install --set image.repository="35.188.44.251:8083/springapp" --set image.tag="${VERSION}" myjavaapp myapp/ ' 
+                        }
+                    }
+               }
+            }
+        }
+        
+        
+           stage('verification du déploiement de l\'application'){
+            steps{
+                script{
+                     withCredentials([kubeconfigFile(credentialsId: 'kubernetes-config', variable: 'KUBECONFIG')]) {
+                         sh '''
+                 
+                         chmod +x healthcheck.sh
+                         ./healthcheck.sh
+                         '''
+
+                     }
+                }
+            }
+        }
+    
+
+    }
+    
+}
